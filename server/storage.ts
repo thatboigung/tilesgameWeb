@@ -1,24 +1,19 @@
 import { db } from "./db";
-import { inquiries, products, testimonials, type InsertInquiry, type Inquiry, type Product, type Testimonial } from "@shared/schema";
+import { analyses, type InsertAnalysis, type Analysis } from "@shared/schema";
 
 export interface IStorage {
-  createInquiry(inquiry: InsertInquiry): Promise<Inquiry>;
-  getProducts(): Promise<Product[]>;
-  getTestimonials(): Promise<Testimonial[]>;
+  getAnalyses(): Promise<Analysis[]>;
+  createAnalysis(analysis: InsertAnalysis): Promise<Analysis>;
 }
 
 export class DatabaseStorage implements IStorage {
-  async createInquiry(inquiry: InsertInquiry): Promise<Inquiry> {
-    const [newInquiry] = await db.insert(inquiries).values(inquiry).returning();
-    return newInquiry;
+  async getAnalyses(): Promise<Analysis[]> {
+    return await db.select().from(analyses);
   }
 
-  async getProducts(): Promise<Product[]> {
-    return await db.select().from(products);
-  }
-
-  async getTestimonials(): Promise<Testimonial[]> {
-    return await db.select().from(testimonials);
+  async createAnalysis(insertAnalysis: InsertAnalysis): Promise<Analysis> {
+    const [analysis] = await db.insert(analyses).values(insertAnalysis).returning();
+    return analysis;
   }
 }
 
