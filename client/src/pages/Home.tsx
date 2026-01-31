@@ -10,7 +10,6 @@ import { useCreateAnalysis } from "@/hooks/use-analyses";
 import { motion } from "framer-motion";
 import { Mic, Waves, Info, Music2, Gamepad2, Settings2 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
-import { PitchDetector } from "pitchy";
 import { Slider } from "@/components/ui/slider";
 import { Label } from "@/components/ui/label";
 
@@ -21,12 +20,18 @@ export default function Home() {
   const [isPlaying, setIsPlaying] = useState(false);
   const [sensitivity, setSensitivity] = useState(0.5);
   const [complexity, setComplexity] = useState(0.15); // Sampling window size
-  const [pitchData, setPitchData] = useState<{ frequency: number; note: string; clarity: number } | null>(null);
+  const [pitchData, setPitchData] = useState<{ frequency: number; note: string; isVocal: boolean } | null>(null);
   const { toast } = useToast();
   const createAnalysis = useCreateAnalysis();
 
   const analyserRef = useRef<AnalyserNode | null>(null);
   const requestRef = useRef<number>();
+  const vocalModeRef = useRef<"vocal" | "full">("full");
+  const pendingModeRef = useRef<{ mode: "vocal" | "full"; since: number } | null>(null);
+  const vocalPrevFreqRef = useRef(0);
+  const vocalPrevTimeRef = useRef(0);
+  const vocalCandidateSinceRef = useRef(0);
+  const highNoisePrevAvgRef = useRef(0);
 
   // Memoize audio context to prevent recreation
   const audioContext = useMemo(() => new (window.AudioContext || (window as any).webkitAudioContext)(), []);
@@ -43,29 +48,115 @@ export default function Home() {
   useEffect(() => {
     if (!isPlaying || !audioContext || !analyserRef.current) {
       setPitchData(null);
+      vocalPrevFreqRef.current = 0;
+      vocalPrevTimeRef.current = 0;
+      vocalCandidateSinceRef.current = 0;
+      highNoisePrevAvgRef.current = 0;
       if (requestRef.current) cancelAnimationFrame(requestRef.current);
       return;
     }
 
-    const detector = PitchDetector.forFloat32Array(analyserRef.current.fftSize);
-    const input = new Float32Array(detector.inputLength);
     const sampleRate = audioContext.sampleRate;
+    const vocalRange = { min: 300, max: 1500 };
+    const highNoiseRange = { min: 3000, max: 8000 };
+    const vocalThreshold = 0.15;
+    const vocalHoldMs = 120;
+    const vocalPitchStableHz = 35;
+    const highNoiseThreshold = 0.12;
+    const highNoiseSpike = 0.3;
+    const modeDebounceMs = 250;
+    const analyser = analyserRef.current;
+    const dataArray = new Uint8Array(analyser.frequencyBinCount);
+    const binHz = sampleRate / analyser.fftSize;
+
+    const getDominantFrequency = (startBin: number, endBin: number) => {
+      let maxAmp = 0;
+      let maxIndex = -1;
+      for (let i = startBin; i <= endBin; i++) {
+        const amp = dataArray[i] ?? 0;
+        if (amp > maxAmp) {
+          maxAmp = amp;
+          maxIndex = i;
+        }
+      }
+      const frequency = maxIndex >= 0 ? maxIndex * binHz : 0;
+      return { frequency, maxAmp };
+    };
 
     const updatePitch = () => {
       if (analyserRef.current) {
-        analyserRef.current.getFloatTimeDomainData(input);
-        const [pitch, clarity] = detector.findPitch(input, sampleRate);
-        
-        // Use sensitivity to filter
-        if (clarity > (1 - sensitivity) && pitch > 0) {
+        analyserRef.current.getByteFrequencyData(dataArray);
+
+        const minBin = Math.max(0, Math.floor(vocalRange.min / binHz));
+        const maxBin = Math.min(dataArray.length - 1, Math.ceil(vocalRange.max / binHz));
+        const highMinBin = Math.max(0, Math.floor(highNoiseRange.min / binHz));
+        const highMaxBin = Math.min(dataArray.length - 1, Math.ceil(highNoiseRange.max / binHz));
+
+        let vocalSum = 0;
+        let vocalCount = 0;
+        for (let i = minBin; i <= maxBin; i++) {
+          vocalSum += dataArray[i] ?? 0;
+          vocalCount++;
+        }
+        const vocalAvg = vocalCount > 0 ? vocalSum / vocalCount / 255 : 0;
+        let highSum = 0;
+        let highCount = 0;
+        for (let i = highMinBin; i <= highMaxBin; i++) {
+          highSum += dataArray[i] ?? 0;
+          highCount++;
+        }
+        const highAvg = highCount > 0 ? highSum / highCount / 255 : 0;
+        const now = performance.now();
+
+        const vocalDominant = getDominantFrequency(minBin, maxBin);
+        const vocalFreqStable =
+          vocalPrevFreqRef.current > 0 &&
+          Math.abs(vocalDominant.frequency - vocalPrevFreqRef.current) <= vocalPitchStableHz;
+        const highSpike =
+          highNoisePrevAvgRef.current > 0 &&
+          (highAvg - highNoisePrevAvgRef.current) / highNoisePrevAvgRef.current >= highNoiseSpike &&
+          now - vocalPrevTimeRef.current <= 40;
+        const highNoiseBlocked = highAvg >= highNoiseThreshold && (!vocalFreqStable || highSpike);
+
+        if (vocalAvg >= vocalThreshold && vocalFreqStable && !highNoiseBlocked) {
+          if (vocalCandidateSinceRef.current === 0) {
+            vocalCandidateSinceRef.current = now;
+          }
+        } else {
+          vocalCandidateSinceRef.current = 0;
+        }
+        const vocalActive =
+          vocalCandidateSinceRef.current > 0 && now - vocalCandidateSinceRef.current >= vocalHoldMs;
+
+        const candidateMode: "vocal" | "full" = vocalActive ? "vocal" : "full";
+        if (candidateMode !== vocalModeRef.current) {
+          if (!pendingModeRef.current || pendingModeRef.current.mode !== candidateMode) {
+            pendingModeRef.current = { mode: candidateMode, since: now };
+          } else if (now - pendingModeRef.current.since >= modeDebounceMs) {
+            vocalModeRef.current = candidateMode;
+            pendingModeRef.current = null;
+          }
+        } else {
+          pendingModeRef.current = null;
+        }
+
+        const mode = vocalModeRef.current;
+        const range =
+          mode === "vocal" ? vocalDominant : getDominantFrequency(0, dataArray.length - 1);
+
+        const minAmplitude = 0.02 + (1 - sensitivity) * 0.18;
+        if (range.frequency > 0 && range.maxAmp / 255 >= minAmplitude) {
           setPitchData({
-            frequency: pitch,
-            note: getNoteName(pitch),
-            clarity
+            frequency: range.frequency,
+            note: getNoteName(range.frequency),
+            isVocal: mode === "vocal",
           });
         } else {
           setPitchData(null);
         }
+        vocalPrevFreqRef.current = vocalDominant.frequency;
+        vocalPrevTimeRef.current = now;
+        highNoisePrevAvgRef.current = highAvg;
       }
       requestRef.current = requestAnimationFrame(updatePitch);
     };
@@ -208,6 +299,7 @@ export default function Home() {
                       </div>
                       <GameCanvas 
                         frequency={pitchData?.frequency || 0} 
+                        isVocal={pitchData?.isVocal ?? false}
                         isPlaying={isPlaying} 
                         sensitivity={sensitivity}
                         complexity={complexity}
