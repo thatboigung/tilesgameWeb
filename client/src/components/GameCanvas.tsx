@@ -247,6 +247,32 @@ export function GameCanvas({ frequency, isVocal, isPlaying, sensitivity, complex
     }
   }, [score, highScore]);
 
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const resizeCanvas = () => {
+      if (isPlaying) {
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+      } else {
+        canvas.width = 600;
+        canvas.height = 400;
+      }
+    };
+
+    resizeCanvas();
+
+    if (isPlaying) {
+      window.addEventListener("resize", resizeCanvas);
+      document.body.style.overflow = "hidden";
+      return () => {
+        window.removeEventListener("resize", resizeCanvas);
+        document.body.style.overflow = "";
+      };
+    }
+  }, [isPlaying]);
+
   const handleHit = (clientX: number) => {
     const canvas = canvasRef.current;
     if (!canvas || !isPlaying) return;
@@ -278,8 +304,14 @@ export function GameCanvas({ frequency, isVocal, isPlaying, sensitivity, complex
   };
 
   return (
-    <div className="space-y-4">
-      <div className="relative w-full h-[400px] bg-black/60 rounded-xl overflow-hidden border border-border/50">
+    <div className={isPlaying ? "fixed inset-0 z-50" : "space-y-4"}>
+      <div
+        className={
+          isPlaying
+            ? "relative w-full h-full bg-black/80 overflow-hidden"
+            : "relative w-full h-[400px] bg-black/60 rounded-xl overflow-hidden border border-border/50"
+        }
+      >
         <div className="absolute top-3 inset-x-0 flex justify-center pointer-events-none">
           <div className="px-4 py-1 rounded-full bg-black/40 border border-white/10 text-pink-300 font-mono text-lg tracking-widest shadow-[0_0_18px_rgba(255,62,165,0.35)]">
             SCORE {score}
